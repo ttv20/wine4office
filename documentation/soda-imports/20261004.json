@@ -1,0 +1,68 @@
+{
+  "upstream": "https://github.com/bottlesdevs/wine",
+  "commit": "6a584a70a2d72ee8afabb840592c80fa712474e3",
+  "range_start": "2958bf5ebeb2ae1f578413e6f0e9bf95516d9233",
+  "wine4office_base": "abf6dffa4604101a5166511631b37d3d07a96019",
+  "imports": [
+    {
+      "patch": "zz-office-display-mode-refresh.mypatch",
+      "soda_commit": "6e6510ba12",
+      "sha256": "0eb65b959d0f33300cb59ffe0aecdc9e94c95e00cb25a1a99dfea7988b80a7b7",
+      "url": "https://github.com/bottlesdevs/wine/blob/6a584a70a2d72ee8afabb840592c80fa712474e3/wine-tkg-userpatches/zz-office-display-mode-refresh.mypatch"
+    },
+    {
+      "patch": "zz-office-scissor-clamp.mypatch",
+      "soda_commit": "39f54e8a4c",
+      "sha256": "9ad1cc38366edf03663f5d0fdebd3fbbf9268dde487ab3981d6dcd43962c53b7",
+      "url": "https://github.com/bottlesdevs/wine/blob/6a584a70a2d72ee8afabb840592c80fa712474e3/wine-tkg-userpatches/zz-office-scissor-clamp.mypatch"
+    },
+    {
+      "patch": "zz-office-shared-mode-settings.mypatch",
+      "soda_commit": "8061a20a5c",
+      "sha256": "b6f4d6aad1e75cf903ae98e6ce4fb1d33dfcceccaba3ef978499e0d5459b4be2",
+      "url": "https://github.com/bottlesdevs/wine/blob/6a584a70a2d72ee8afabb840592c80fa712474e3/wine-tkg-userpatches/zz-office-shared-mode-settings.mypatch"
+    }
+  ],
+  "not_imported": [
+    {
+      "patch": "zz-office-window-surface-initial-paint.mypatch",
+      "soda_commit": "f0831b5130",
+      "sha256": "6c13723032c63eeeaf7e9b9cdc5f51585d76a432e63780ecd875bba20ce63f8b",
+      "url": "https://github.com/bottlesdevs/wine/blob/6a584a70a2d72ee8afabb840592c80fa712474e3/wine-tkg-userpatches/zz-office-window-surface-initial-paint.mypatch",
+      "reason": "Deferred: only affects style-driven visibility, where Wine intentionally skips repainting as Windows does; no Wine4Office reproduction."
+    },
+    {
+      "patch": "zz-office-window-surface-represent.mypatch",
+      "soda_commit": "6a584a70a2",
+      "sha256": "e77549e0e6b84f9c883870e4afcd3ca1ebc38f63af36651e9256a69f856f25d6",
+      "url": "https://github.com/bottlesdevs/wine/blob/6a584a70a2d72ee8afabb840592c80fa712474e3/wine-tkg-userpatches/zz-office-window-surface-represent.mypatch",
+      "reason": "Not imported: offscreen client contents already persist in the window surface, and the Wine4Office Wayland present callback has side effects that are unsafe from the expose path."
+    },
+    {
+      "patch": "zz-office-web-token-results.mypatch",
+      "soda_commit": "92b2a42aba",
+      "sha256": "3b1e507d9d4b48742e647612695b4dab42e38908478f0cb0af0e7a25027e8470",
+      "url": "https://github.com/bottlesdevs/wine/blob/6a584a70a2d72ee8afabb840592c80fa712474e3/wine-tkg-userpatches/zz-office-web-token-results.mypatch",
+      "reason": "Already covered: Wine4Office's own WAM implementation returns a provider error with a message for every unsuccessful token request."
+    },
+    {
+      "patch": "zz-office-composition-graphics-device2.mypatch",
+      "soda_commit": "cf7cd8bb9c",
+      "sha256": "660ea9211be67c72058a69092dd3df603be60c3ed9fbd7979d52fb951c43ec45",
+      "url": "https://github.com/bottlesdevs/wine/blob/6a584a70a2d72ee8afabb840592c80fa712474e3/wine-tkg-userpatches/zz-office-composition-graphics-device2.mypatch",
+      "reason": "Deferred: no Wine4Office log shows Office requesting ICompositionGraphicsDevice2; needs a reproduction and a port onto dlls/windows.ui/compositor.c."
+    },
+    {
+      "patch": "zz-office-composition-source-parameter.mypatch",
+      "soda_commit": "a38aa2d6d7",
+      "sha256": "1594ee8d080f901ef625f66a124b29e4d744341111794d62731af2e5d99c839e",
+      "url": "https://github.com/bottlesdevs/wine/blob/6a584a70a2d72ee8afabb840592c80fa712474e3/wine-tkg-userpatches/zz-office-composition-source-parameter.mypatch",
+      "reason": "Deferred: no activation request in Wine4Office logs, and composition effect factories are not implemented yet, so the class would have no consumer."
+    }
+  ],
+  "adaptations": [
+    "The Vulkan scissor extent is computed from the clamped non-negative offset, matching vkd3d-proton, instead of clamping right - left.",
+    "SharedModeSettings uses Wine4Office's per-class twinapi.appcore factory style instead of Soda's declarative factory table.",
+    "Added a d3d11 test for inverted scissor rectangles; the SharedModeSettings test asserts the reported values only on Wine."
+  ]
+}

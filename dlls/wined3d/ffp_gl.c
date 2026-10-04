@@ -1187,8 +1187,9 @@ static void scissorrect(struct wined3d_context *context, const struct wined3d_st
 
             sr[i * 4] = r->left;
             sr[i * 4 + 1] = r->top;
-            sr[i * 4 + 2] = r->right - r->left;
-            sr[i * 4 + 3] = r->bottom - r->top;
+            /* Inverted D3D scissor rectangles are empty; GL rejects negative sizes. */
+            sr[i * 4 + 2] = max(0, r->right - r->left);
+            sr[i * 4 + 3] = max(0, r->bottom - r->top);
         }
 
         if (context->scissor_rect_count > state->scissor_rect_count)
@@ -1204,7 +1205,8 @@ static void scissorrect(struct wined3d_context *context, const struct wined3d_st
     else
     {
         r = &state->scissor_rects[0];
-        gl_info->gl_ops.gl.p_glScissor(r->left, r->top, r->right - r->left, r->bottom - r->top);
+        gl_info->gl_ops.gl.p_glScissor(r->left, r->top,
+                max(0, r->right - r->left), max(0, r->bottom - r->top));
         checkGLcall("glScissor");
     }
 }

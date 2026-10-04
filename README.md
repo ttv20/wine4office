@@ -95,6 +95,13 @@ licensed under the GNU LGPL 2.1 or later. Wine4Office retains its native
 Wayland/XWayland composition and input architecture rather than importing the
 fork's X11/BitBlt presentation backend.
 
+Display mode refresh, empty scissor rectangle handling and the
+SharedModeSettings class were imported from the Microsoft 365 work of
+[Mirko Brombin](https://github.com/mirkobrombin) and the
+[Bottles/Soda contributors](https://github.com/bottlesdevs/wine). The
+[import manifest](documentation/soda-imports/20261004.json) records the exact
+source revision, patch links and checksums.
+
 ---
 
 *Wine4Office is not affiliated with WineHQ or Microsoft. All trademarks belong to their respective corporate overlords.*

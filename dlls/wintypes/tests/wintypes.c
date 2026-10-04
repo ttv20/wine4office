@@ -453,6 +453,7 @@ static void test_IApiInformationStatics(void)
     present_contracts[] =
     {
         { L"Windows.Foundation.UniversalApiContract", 10, },
+        { L"Windows.System.Profile.ProfileSharedModeContract", 1, },
     };
 
     static const WCHAR *class_name = L"Windows.Foundation.Metadata.ApiInformation";
@@ -852,12 +853,22 @@ static void test_IApiInformationStatics(void)
         for (j = 0; j <= present_contracts[i].max_major; ++j)
         {
             ret = FALSE;
-            hr = IApiInformationStatics_IsApiContractPresentByMajor(statics, str, i, &ret);
+            hr = IApiInformationStatics_IsApiContractPresentByMajor(statics, str, j, &ret);
             ok(hr == S_OK, "IsApiContractPresentByMajor failed, hr %#lx, i %u, major %u.\n", hr, i, j);
             ok(ret == TRUE, "IsApiContractPresentByMajor returned FALSE, i %u, major %u.\n", i, j);
         }
         WindowsDeleteString(str);
     }
+
+    /* ISharedModeSettingsStatics2 requires ProfileSharedModeContract 2.0 (Windows 10 1703). */
+    hr = WindowsCreateString(L"Windows.System.Profile.ProfileSharedModeContract",
+            wcslen(L"Windows.System.Profile.ProfileSharedModeContract"), &str);
+    ok(hr == S_OK, "WindowsCreateString failed, hr %#lx.\n", hr);
+    ret = FALSE;
+    hr = IApiInformationStatics_IsApiContractPresentByMajor(statics, str, 2, &ret);
+    ok(hr == S_OK, "IsApiContractPresentByMajor failed, hr %#lx.\n", hr);
+    ok(ret == TRUE || broken(ret == FALSE), "IsApiContractPresentByMajor returned FALSE.\n");
+    WindowsDeleteString(str);
 
     IApiInformationStatics_Release(statics);
     IAgileObject_Release(agile_object);

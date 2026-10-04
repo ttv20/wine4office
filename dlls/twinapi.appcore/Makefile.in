@@ -12,4 +12,5 @@ SOURCES = \
 	lifecycle.c \
 	data_transfer.c \
 	main.c \
-	retail_info.c
+	retail_info.c \
+	shared_mode_settings.c
