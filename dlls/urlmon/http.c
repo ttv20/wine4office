@@ -501,6 +501,20 @@ static BOOL is_redirect_response(DWORD status_code)
     return FALSE;
 }
 
+/* WinInet cannot follow a redirect to a scheme it does not know, such as
+ * ms-appx-web://, and hands the 3xx response back as the final response.
+ * Report the target as a redirect so the host can navigate to it. */
+static BOOL is_foreign_scheme_url(const WCHAR *url)
+{
+    const WCHAR *p = url;
+
+    if(!url || !iswalpha(*p)) return FALSE;
+    while(iswalnum(*p) || *p == '+' || *p == '-' || *p == '.') p++;
+    if(p[0] != ':' || p[1] != '/' || p[2] != '/') return FALSE;
+    return (p - url != 4 || _wcsnicmp(url, L"http", 4)) &&
+           (p - url != 5 || _wcsnicmp(url, L"https", 5));
+}
+
 static HRESULT HttpProtocol_start_downloading(Protocol *prot)
 {
     HttpProtocol *This = impl_from_Protocol(prot);
@@ -530,6 +544,17 @@ static HRESULT HttpProtocol_start_downloading(Protocol *prot)
             IInternetProtocolSink_ReportResult(This->base.protocol_sink, INET_E_REDIRECT_FAILED, 0, location);
             free(location);
             return INET_E_REDIRECT_FAILED;
+        }
+
+        if(is_redirect_response(status_code)) {
+            WCHAR *location = query_http_info(This, HTTP_QUERY_LOCATION);
+
+            if(is_foreign_scheme_url(location)) {
+                TRACE("Redirect to unsupported scheme %s\n", debugstr_w(location));
+                IInternetProtocolSink_ReportProgress(This->base.protocol_sink,
+                        BINDSTATUS_REDIRECTING, location);
+            }
+            free(location);
         }
 
         response_headers = query_http_info(This, HTTP_QUERY_RAW_HEADERS_CRLF);
