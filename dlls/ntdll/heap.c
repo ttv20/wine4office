@@ -441,6 +441,23 @@ static inline struct block *next_block( const SUBHEAP *subheap, const struct blo
     return (struct block *)next;
 }
 
+static BOOL get_free_block_discard_range( const SUBHEAP *subheap, const struct block *block,
+                                          void **addr, SIZE_T *size )
+{
+    const UINT_PTR page_mask = page_size - 1;
+    char *start, *end, *commit_end = (char *)subheap_commit_end( subheap );
+
+    /* Preserve the free-list entry and the following block's back pointer. */
+    start = ROUND_ADDR( (char *)((const struct entry *)block + 1) + page_mask, page_mask );
+    end = ROUND_ADDR( (char *)block + block_get_size( block ) - sizeof(void *), page_mask );
+    if (end > commit_end) end = ROUND_ADDR( commit_end, page_mask );
+    if (end <= start) return FALSE;
+
+    *addr = start;
+    *size = end - start;
+    return TRUE;
+}
+
 static inline BOOL check_subheap( const SUBHEAP *subheap, const struct heap *heap )
 {
     if (subheap->user_value != heap) return FALSE;
@@ -905,6 +922,19 @@ static struct block *heap_delay_free( struct heap *heap, ULONG flags, struct blo
     return tmp;
 }
 
+static void discard_free_block_pages( ULONG flags, const SUBHEAP *subheap, const struct block *block )
+{
+    SIZE_T size;
+    void *addr;
+
+    if ((flags & HEAP_FREE_CHECKING_ENABLED) || RUNNING_ON_VALGRIND) return;
+    if (!get_free_block_discard_range( subheap, block, &addr, &size )) return;
+
+    /* Keep the address range committed. The Unix backend marks its physical
+     * pages as lazily reclaimable, so immediate reuse stays cheap. */
+    NtAllocateVirtualMemory( NtCurrentProcess(), &addr, 0, &size, MEM_RESET, PAGE_NOACCESS );
+}
+
 
 static NTSTATUS heap_free_block( struct heap *heap, ULONG flags, struct block *block )
 {
@@ -947,6 +977,7 @@ static NTSTATUS heap_free_block( struct heap *heap, ULONG flags, struct block *b
 
     /* keep room for a full committed block as hysteresis */
     if (!next) subheap_decommit( heap, subheap, (char *)((struct entry *)block + 1) + REGION_ALIGN );
+    discard_free_block_pages( flags, subheap, block );
 
     return STATUS_SUCCESS;
 }
@@ -1719,6 +1750,7 @@ static NTSTATUS heap_allocate_block( struct heap *heap, ULONG flags, SIZE_T bloc
     {
         block_init_free( next, flags, subheap, old_block_size - block_size );
         insert_free_block( heap, flags, subheap, next );
+        discard_free_block_pages( flags, subheap, next );
     }
 
     block_set_type( block, BLOCK_TYPE_USED );
@@ -2160,6 +2192,7 @@ static NTSTATUS heap_resize_block( struct heap *heap, ULONG flags, struct block 
     {
         block_init_free( next, flags, subheap, old_block_size - block_size );
         insert_free_block( heap, flags, subheap, next );
+        discard_free_block_pages( flags, subheap, next );
     }
 
     valgrind_notify_resize( block + 1, *old_size, size );
