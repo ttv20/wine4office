@@ -3,8 +3,8 @@
  *
  * Hosts Microsoft authentication in an owner-window MSHTML control inside the
  * Wine prefix, exchanges the public-client PKCE code, and stores each account's
- * versioned WAM bundle with DPAPI.  It never opens the host browser and never
- * logs tokens.
+ * versioned WAM bundle with DPAPI. Optional host-browser login preserves the
+ * same PKCE flow and registered callback. It never logs tokens.
  */
 #include <windows.h>
 #include <bcrypt.h>
@@ -2149,6 +2149,190 @@ public:
     }
 };
 
+/* Host-browser authorization uses the same Office client, redirect and PKCE
+ * exchange as embedded login. Only a matching active state may supply a code. */
+static const WCHAR external_class[] = L"Wine4OfficeExternalOAuth";
+static const ULONG_PTR external_copydata_tag = 0x57414d31;
+
+static bool browser_auth_enabled()
+{
+    WCHAR mode[16];
+    return GetEnvironmentVariableW(L"WINE4OFFICE_AUTH_MODE", mode, ARRAYSIZE(mode)) == 7 &&
+           !wcscmp(mode, L"browser");
+}
+
+static int external_callback_result(const WCHAR *uri, const std::string &expected_state,
+                                    std::string &code)
+{
+    static const WCHAR prefix[] =
+        L"ms-appx-web://Microsoft.AAD.BrokerPlugin/d3590ed6-52b3-4102-aeff-aad2292ab01c?";
+    std::string state, error, candidate, url;
+    int result = 0;
+    unsigned states = 0, codes = 0, errors = 0;
+    secure_clear(code);
+    if (!uri || wcslen(uri) > 16384 || expected_state.empty() ||
+        _wcsnicmp(uri, prefix, ARRAYSIZE(prefix) - 1) || wcschr(uri, '#')) return 0;
+    for (const WCHAR *ch = uri; *ch; ++ch)
+        if (*ch < 32 || *ch == 127) return 0;
+    url = wide_to_utf8(uri);
+    for (size_t pos = url.find('?') + 1; pos < url.size();)
+    {
+        size_t end = url.find('&', pos);
+        if (end == std::string::npos) end = url.size();
+        size_t equals = url.find('=', pos);
+        if (equals > end) equals = end;
+        std::string key = url_decode(url.substr(pos, equals - pos));
+        std::string value = equals < end ? url_decode(url.substr(equals + 1, end - equals - 1)) : "";
+        if (key == "state") { ++states; state = value; }
+        if (key == "code") { ++codes; candidate = value; }
+        if (key == "error") { ++errors; error = value; }
+        secure_clear(value);
+        pos = end + 1;
+    }
+    if (states == 1 && state == expected_state)
+    {
+        if (codes == 1 && errors == 0 && !candidate.empty()) { code = candidate; result = 1; }
+        else if (codes == 0 && errors == 1 && !error.empty()) result = 2;
+    }
+    secure_clear(url); secure_clear(state); secure_clear(candidate); secure_clear(error);
+    return result;
+}
+
+static LRESULT CALLBACK external_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    switch (message)
+    {
+    case WM_COPYDATA:
+    {
+        if (oauth_error || oauth_cancelled || !oauth_code.empty()) return FALSE;
+        const COPYDATASTRUCT *data = (const COPYDATASTRUCT *)lparam;
+        if (!data || data->dwData != external_copydata_tag || !data->lpData ||
+            data->cbData < sizeof(WCHAR) || data->cbData > 32770 || data->cbData % sizeof(WCHAR))
+            return FALSE;
+        const WCHAR *uri = (const WCHAR *)data->lpData;
+        size_t length = data->cbData / sizeof(WCHAR);
+        if (uri[length - 1] || wcslen(uri) != length - 1) return FALSE;
+        std::string candidate;
+        int result = external_callback_result(uri, oauth_state, candidate);
+        if (!result) return FALSE;
+        oauth_error = result != 1;
+        oauth_code = candidate;
+        secure_clear(candidate);
+        PostMessageW(hwnd, WM_CLOSE, 1, 0);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wparam) == IDCANCEL) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return 0;
+    case WM_TIMER:
+        if (!oauth_code.empty() || oauth_error || oauth_cancelled) return 0;
+        oauth_error = true;
+        PostMessageW(hwnd, WM_CLOSE, 1, 0);
+        return 0;
+    case WM_CLOSE:
+        if (!wparam) oauth_cancelled = true;
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        KillTimer(hwnd, 1);
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+static HWND create_external_window(HINSTANCE instance, HWND owner)
+{
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = external_window_proc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = external_class;
+    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return NULL;
+    return CreateWindowExW(WS_EX_DLGMODALFRAME, external_class, L"Microsoft 365 - browser sign-in",
+                           WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                           CW_USEDEFAULT, CW_USEDEFAULT, 540, 230, owner, NULL, instance, NULL);
+}
+
+static bool run_external_oauth(HINSTANCE instance, HWND owner, const std::wstring &authorize_url)
+{
+    MSG message;
+    host_window = create_external_window(instance, owner);
+    if (!host_window) return false;
+    center_window(host_window, owner);
+    CreateWindowW(L"STATIC", L"Finish signing in with your work or school account in your browser.\n\n"
+                  L"Complete MFA there. If asked, allow the browser to open Wine4Office Sign-in Return.\n\n"
+                  L"Leave this window open. Office will continue automatically after sign-in.",
+                  WS_CHILD | WS_VISIBLE, 18, 18, 495, 130, host_window, NULL, instance, NULL);
+    CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                  405, 160, 105, 28, host_window, (HMENU)IDCANCEL, instance, NULL);
+    if (!SetTimer(host_window, 1, 15 * 60 * 1000, NULL)) { DestroyWindow(host_window); return false; }
+    ShowWindow(host_window, SW_SHOW);
+    UpdateWindow(host_window);
+    INT_PTR opened = (INT_PTR)ShellExecuteW(NULL, L"open", authorize_url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    if (opened <= 32) { DestroyWindow(host_window); return false; }
+    while (GetMessageW(&message, NULL, 0, 0) > 0)
+    {
+        if (!IsDialogMessageW(host_window, &message))
+        { TranslateMessage(&message); DispatchMessageW(&message); }
+    }
+    return !oauth_cancelled && !oauth_error && !oauth_code.empty();
+}
+
+static int forward_browser_callback(const WCHAR *uri)
+{
+    if (!uri || wcslen(uri) > 16384) return 3;
+    COPYDATASTRUCT data = {external_copydata_tag, (DWORD)((wcslen(uri) + 1) * sizeof(WCHAR)), (void *)uri};
+    HWND target = NULL;
+    while ((target = FindWindowExW(NULL, target, external_class, NULL)))
+    {
+        DWORD_PTR accepted = FALSE;
+        if (SendMessageTimeoutW(target, WM_COPYDATA, 0, (LPARAM)&data,
+                                SMTO_ABORTIFHUNG | SMTO_BLOCK, 5000, &accepted) && accepted)
+            return 0;
+    }
+    return 3;
+}
+
+static bool self_test_browser_auth()
+{
+    const std::wstring base = utf8_to_wide(redirect_uri);
+    std::string code;
+    if (external_callback_result((base + L"?code=test-code&state=test-state").c_str(), "test-state", code) != 1 ||
+        code != "test-code") return false;
+    if (external_callback_result((base + L"?error=access_denied&state=test-state").c_str(), "test-state", code) != 2 ||
+        !code.empty()) return false;
+    for (const std::wstring &uri : {
+        base + L"?code=test-code&state=wrong-state",
+        base + L"?code=&state=test-state", base + L"?error=&state=test-state",
+        base + L"?code=test&state=test-state&state", base + L"?code=test&code&state=test-state",
+        base + L"?code=test\n&state=test-state",
+        base + L"?code=" + std::wstring(16384, L'x') + L"&state=test-state", base + L"?code=test-code",
+        base + L"?code=test&code=other&state=test-state", base + L"?code=test&%63ode=other&state=test-state",
+        base + L"?code=test&error=denied&state=test-state", base + L"?code=test&state=test-state&state=other",
+        base + L"?code=test&state=test-state#fragment", base + L"-other?code=test&state=test-state",
+        std::wstring(L"https://evil.invalid/?code=test&state=test-state")})
+        if (external_callback_result(uri.c_str(), "test-state", code) || !code.empty()) return false;
+    if (external_callback_result((base + L"?%63ode=test%2Bcode&%73tate=test-state").c_str(),
+                                 "test-state", code) != 1 || code != "test+code") return false;
+    return !external_callback_result((base + L"?code=test&state=").c_str(), "", code);
+}
+
+/* Synthetic end-to-end callback test; no network, cache or token exchange. */
+static int self_test_browser_listener(HINSTANCE instance)
+{
+    MSG message;
+    oauth_state = "w4o-synthetic-callback-state";
+    host_window = create_external_window(instance, NULL);
+    if (!host_window || !SetTimer(host_window, 1, 10000, NULL)) return 3;
+    while (GetMessageW(&message, NULL, 0, 0) > 0)
+    { TranslateMessage(&message); DispatchMessageW(&message); }
+    bool success = !oauth_error && !oauth_cancelled && oauth_code == "w4o-synthetic-code";
+    secure_clear(oauth_code); secure_clear(oauth_state);
+    return success ? 0 : 3;
+}
+
 static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &login_hint,
                             const std::string &requested_client_id,
                             const std::string &requested_scope,
@@ -2204,6 +2388,12 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
     if (!login_hint.empty()) authorize_url += "&login_hint=" + url_encode(login_hint);
     authorize_url_w = utf8_to_wide(authorize_url);
     if (authorize_url_w.empty()) return false;
+    if (browser_auth_enabled() && !oauth_consumer && requested_client_id == client_id &&
+        requested_redirect_uri == redirect_uri)
+    {
+        owner_state.disable();
+        return run_external_oauth(instance, owner, authorize_url_w);
+    }
 
     window_class.lpfnWndProc = window_proc;
     window_class.hInstance = instance;
@@ -2586,6 +2776,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     bool success;
     (void)previous; (void)command_line; (void)show;
     if (!argv) return 3;
+    if (argc == 3 && !wcscmp(argv[1], L"--browser-callback"))
+    {
+        int result = forward_browser_callback(argv[2]);
+        SecureZeroMemory(argv[2], wcslen(argv[2]) * sizeof(WCHAR));
+        LocalFree(argv);
+        return result;
+    }
+    if (argc == 2 && !wcscmp(argv[1], L"--self-test-browser"))
+    {
+        bool passed = self_test_browser_auth();
+        LocalFree(argv);
+        return passed ? 0 : 3;
+    }
+    if (argc == 2 && !wcscmp(argv[1], L"--self-test-browser-listener"))
+    {
+        LocalFree(argv);
+        return self_test_browser_listener(instance);
+    }
     if (argc >= 3 && !wcscmp(argv[1], L"--self-test-helper"))
     {
         if (!wcscmp(argv[2], L"fail"))

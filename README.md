@@ -53,6 +53,15 @@ without prompting (and force-stop them only if graceful shutdown times out).
 
 ---
 
+## Work or school sign-in
+
+If the embedded sign-in page goes blank during MFA or your organization's
+redirect, builds containing this change support an opt-in
+[system-browser sign-in flow](programs/wine4officeauth/BROWSER-AUTH.md).
+It requires a Linux callback handler configured for your Office prefix.
+
+---
+
 ## Build It Yourself
 
 ```bash
