@@ -892,6 +892,7 @@ def _office_tasklist(prefix: Path, wine: Path, use_x11: bool,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            errors="replace",
             timeout=timeout,
             check=False,
         )
