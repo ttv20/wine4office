@@ -896,6 +896,26 @@ exit 0
             [str(self.wine), "tasklist.exe", "/FO", "CSV", "/NH"],
         )
 
+    def test_office_detection_tolerates_localized_non_utf8_output(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        raw_output = b'"WINWORD.EXE","4242","Console","1","25\xa0780 K"\r\n'
+
+        def run_tasklist(*args, **kwargs):
+            stdout = raw_output.decode("utf-8", errors=kwargs.get("errors"))
+            return subprocess.CompletedProcess(
+                args[0], 0, stdout=stdout, stderr=""
+            )
+
+        with mock.patch.object(
+            backend.subprocess, "run", side_effect=run_tasklist
+        ) as run:
+            self.assertEqual(
+                backend._owned_office_pids(prefix, self.wine, False), [4242]
+            )
+
+        self.assertTrue(run.call_args.kwargs["text"])
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
+
     def test_force_kill_accepts_selected_runner_wine_preloader(self):
         prefix = self._make_prefix(self.home / ".wine4office")
         proc_root = self.root / "proc"
