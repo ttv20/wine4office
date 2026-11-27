@@ -2414,6 +2414,12 @@ static const char nostatustext[] =
 "HTTP/1.1 200\r\n"
 "\r\n";
 
+static const char chunkedclose[] =
+"HTTP/1.1 200 OK\r\n"
+"Transfer-Encoding: chunked\r\n"
+"\r\n"
+"5\r\nhello\r\n";
+
 static const char proxy_pac[] =
 "function FindProxyForURL(url, host) {\r\n"
 "    url = url.replace(/[:/]/g, '_');\r\n"
@@ -2737,6 +2743,8 @@ static DWORD CALLBACK server_thread(LPVOID param)
             r = server_receive_request(c, buffer, sizeof(buffer));
             ok(!r, "got %d, buffer[0] %d.\n", r, buffer[0] );
         }
+        if (strstr(buffer, "GET /chunkedclose"))
+            send(c, chunkedclose, sizeof chunkedclose - 1, 0);
         shutdown(c, 2);
         closesocket(c);
         c = -1;
@@ -4131,6 +4139,51 @@ static void test_bad_header( int port )
     WinHttpCloseHandle( req );
     WinHttpCloseHandle( con );
     WinHttpCloseHandle( ses );
+}
+
+static void test_chunked_close(int port)
+{
+    HINTERNET ses, con, req;
+    char buffer[16];
+    DWORD count, total;
+    unsigned int i;
+    BOOL ret;
+
+    ses = WinHttpOpen(L"winetest", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+    ok(ses != NULL, "failed to open session %lu\n", GetLastError());
+
+    con = WinHttpConnect(ses, L"localhost", port, 0);
+    ok(con != NULL, "failed to open a connection %lu\n", GetLastError());
+
+    /* the second request must not reuse the connection closed by the server */
+    for (i = 0; i < 2; i++)
+    {
+        req = WinHttpOpenRequest(con, NULL, L"/chunkedclose", NULL, NULL, NULL, 0);
+        ok(req != NULL, "%u: failed to open a request %lu\n", i, GetLastError());
+
+        ret = WinHttpSendRequest(req, NULL, 0, NULL, 0, 0, 0);
+        ok(ret, "%u: failed to send request %lu\n", i, GetLastError());
+
+        ret = WinHttpReceiveResponse(req, NULL);
+        ok(ret, "%u: failed to receive response %lu\n", i, GetLastError());
+
+        /* the server closes the connection before the terminating zero-size chunk */
+        total = 0;
+        while (total < sizeof(buffer))
+        {
+            count = 0;
+            ret = WinHttpReadData(req, buffer + total, sizeof(buffer) - total, &count);
+            if (!ret || !count) break;
+            total += count;
+        }
+        ok(total == 5 && !memcmp(buffer, "hello", 5), "%u: Expected 5 bytes \"hello\", got %lu bytes %s.\n",
+           i, total, debugstr_an(buffer, total));
+
+        WinHttpCloseHandle(req);
+    }
+
+    WinHttpCloseHandle(con);
+    WinHttpCloseHandle(ses);
 }
 
 static void test_multiple_reads(int port)
@@ -6587,6 +6640,7 @@ START_TEST (winhttp)
     test_large_data_authentication(si.port);
     test_bad_header(si.port);
     test_multiple_reads(si.port);
+    test_chunked_close(si.port);
     test_cookies(si.port);
     test_request_path_escapes(si.port);
     test_passport_auth(si.port);
