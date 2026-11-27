@@ -2417,7 +2417,6 @@ static const char nostatustext[] =
 static const char chunkedclose[] =
 "HTTP/1.1 200 OK\r\n"
 "Transfer-Encoding: chunked\r\n"
-"Connection: close\r\n"
 "\r\n"
 "5\r\nhello\r\n";
 
@@ -4146,7 +4145,8 @@ static void test_chunked_close(int port)
 {
     HINTERNET ses, con, req;
     char buffer[16];
-    DWORD count, total = 0;
+    DWORD count, total;
+    unsigned int i;
     BOOL ret;
 
     ses = WinHttpOpen(L"winetest", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
@@ -4155,27 +4155,33 @@ static void test_chunked_close(int port)
     con = WinHttpConnect(ses, L"localhost", port, 0);
     ok(con != NULL, "failed to open a connection %lu\n", GetLastError());
 
-    req = WinHttpOpenRequest(con, NULL, L"/chunkedclose", NULL, NULL, NULL, 0);
-    ok(req != NULL, "failed to open a request %lu\n", GetLastError());
-
-    ret = WinHttpSendRequest(req, NULL, 0, NULL, 0, 0, 0);
-    ok(ret, "failed to send request %lu\n", GetLastError());
-
-    ret = WinHttpReceiveResponse(req, NULL);
-    ok(ret, "failed to receive response %lu\n", GetLastError());
-
-    /* the server closes the connection before the terminating zero-size chunk */
-    while (total < sizeof(buffer))
+    /* the second request must not reuse the connection closed by the server */
+    for (i = 0; i < 2; i++)
     {
-        count = 0;
-        ret = WinHttpReadData(req, buffer + total, sizeof(buffer) - total, &count);
-        if (!ret || !count) break;
-        total += count;
-    }
-    ok(total == 5 && !memcmp(buffer, "hello", 5), "Expected 5 bytes \"hello\", got %lu bytes %s.\n",
-       total, debugstr_an(buffer, total));
+        req = WinHttpOpenRequest(con, NULL, L"/chunkedclose", NULL, NULL, NULL, 0);
+        ok(req != NULL, "%u: failed to open a request %lu\n", i, GetLastError());
 
-    WinHttpCloseHandle(req);
+        ret = WinHttpSendRequest(req, NULL, 0, NULL, 0, 0, 0);
+        ok(ret, "%u: failed to send request %lu\n", i, GetLastError());
+
+        ret = WinHttpReceiveResponse(req, NULL);
+        ok(ret, "%u: failed to receive response %lu\n", i, GetLastError());
+
+        /* the server closes the connection before the terminating zero-size chunk */
+        total = 0;
+        while (total < sizeof(buffer))
+        {
+            count = 0;
+            ret = WinHttpReadData(req, buffer + total, sizeof(buffer) - total, &count);
+            if (!ret || !count) break;
+            total += count;
+        }
+        ok(total == 5 && !memcmp(buffer, "hello", 5), "%u: Expected 5 bytes \"hello\", got %lu bytes %s.\n",
+           i, total, debugstr_an(buffer, total));
+
+        WinHttpCloseHandle(req);
+    }
+
     WinHttpCloseHandle(con);
     WinHttpCloseHandle(ses);
 }
