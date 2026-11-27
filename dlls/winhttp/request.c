@@ -335,6 +335,8 @@ static DWORD chunked_fill_buffer( struct data_stream *stream, struct request *re
         }
     } while (continue_read);
 
+    /* the rest of the response is lost, the connection can't be reused */
+    if (chunked_stream->state == CHUNKED_STREAM_STATE_ERROR) netconn_cancel_io( request->netconn );
     return ret;
 }
 
